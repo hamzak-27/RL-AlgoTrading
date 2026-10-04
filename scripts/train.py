@@ -48,6 +48,10 @@ def parse_args():
     p.add_argument("--window", type=int, default=10)
     p.add_argument("--fee", type=float, default=0.001)
     p.add_argument("--episode-length", type=int, default=365)
+    p.add_argument("--switch-penalty", type=float, default=0.0,
+                   help="reward penalty per unit of position changed")
+    p.add_argument("--min-hold", type=int, default=0,
+                   help="minimum days a position must be held after a trade")
     p.add_argument("--dqn", nargs="*", default=[], metavar="KEY=VALUE",
                    help="DQNConfig overrides, e.g. hidden=32 lr=1e-4")
     p.add_argument("--show-test", action="store_true")
@@ -98,6 +102,7 @@ def main():
     dqn_overrides = {k: ast.literal_eval(v) for k, v in (kv.split("=", 1) for kv in args.dqn)}
     cfg = RunConfig(symbol=args.symbol, steps=args.steps, eval_every=args.eval_every,
                     window=args.window, fee=args.fee, episode_length=args.episode_length,
+                    switch_penalty=args.switch_penalty, min_hold=args.min_hold,
                     dqn=dqn_overrides)
     out = Path("results") / args.symbol / args.name
     out.mkdir(parents=True, exist_ok=True)

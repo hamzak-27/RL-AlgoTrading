@@ -93,3 +93,26 @@ def test_random_training_episodes_stay_in_range():
             *_, terminated, truncated, info = env.step(1)
             done = terminated or truncated
         assert info["date"] <= pd.Timestamp("2020-10-31")
+
+
+def test_switch_penalty_changes_reward_but_not_money():
+    df = make_df()
+    plain, penalised = TradingEnv(df), TradingEnv(df, switch_penalty=0.01)
+    plain.reset(seed=0), penalised.reset(seed=0)
+    for action in (1, 1, 0):  # buy, hold, sell
+        _, r_plain, *_, info_plain = plain.step(action)
+        _, r_pen, *_, info_pen = penalised.step(action)
+        assert info_pen["value"] == info_plain["value"]
+        assert r_pen == pytest.approx(r_plain - 0.01 * info_plain["traded"])
+
+
+def test_min_hold_locks_the_position():
+    env = TradingEnv(make_df(), min_hold=3)
+    obs, _ = env.reset(seed=0)
+    assert obs.shape == env.observation_space.shape
+    positions = []
+    for action in (1, 0, 0, 0, 0):  # buy, then try to sell every day
+        obs, *_, info = env.step(action)
+        positions.append(info["position"])
+    # held for 3 days (the buy day plus two locked days), then the sell goes through
+    assert positions == [1.0, 1.0, 1.0, 0.0, 0.0]

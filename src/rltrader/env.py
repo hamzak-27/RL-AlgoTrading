@@ -38,6 +38,8 @@ class TradingEnv(gym.Env):
         episode_length: int | None = None,
         start: str | None = None,
         end: str | None = None,
+        switch_penalty: float = 0.0,
+        min_hold: int = 0,
     ):
         """
         df:             bars with open/high/low/close/volume, ascending by date
@@ -49,6 +51,13 @@ class TradingEnv(gym.Env):
         episode_length: if set, each reset starts at a random date and runs for
                         this many days (training). If None, an episode walks
                         the whole period once from the start (evaluation).
+        switch_penalty: extra amount subtracted from the *reward* (not from the
+                        portfolio) per unit of position changed. It teaches
+                        the agent that switching must be worth it; the money
+                        it actually has is still computed with ``fee`` only.
+        min_hold:       after a trade the position is locked until it has been
+                        held this many days. When > 0, the observation gets one
+                        extra number: the share of the lock still remaining.
         start, end:     restrict trading to this date range (inclusive). Pass
                         the full price history as ``df`` and choose the period
                         here, so features at the start of a period can still
@@ -65,6 +74,8 @@ class TradingEnv(gym.Env):
         self.fee = fee
         self.positions = np.asarray(positions, dtype=np.float64)
         self.episode_length = episode_length
+        self.switch_penalty = switch_penalty
+        self.min_hold = min_hold
 
         self.first_t = window - 1          # earliest day with a full window
         self.last_t = len(self.dates) - 1  # last day we have prices for
@@ -75,14 +86,18 @@ class TradingEnv(gym.Env):
         if self.last_t - self.first_t < 2:
             raise ValueError("Not enough data for this window size")
 
-        obs_dim = window * self.features.shape[1] + 1  # +1 for current position
+        # +1 for current position, +1 for the holding lock if it is in use
+        obs_dim = window * self.features.shape[1] + 1 + (1 if min_hold > 0 else 0)
         self.action_space = spaces.Discrete(len(self.positions))
         self.observation_space = spaces.Box(-np.inf, np.inf, (obs_dim,), np.float32)
 
     # ------------------------------------------------------------------ helpers
     def _obs(self) -> np.ndarray:
         block = self.features[self.t - self.window + 1 : self.t + 1].ravel()
-        return np.append(block, np.float32(self.position)).astype(np.float32)
+        extra = [self.position]
+        if self.min_hold > 0:
+            extra.append(self.lock / self.min_hold)
+        return np.concatenate([block, np.asarray(extra, dtype=np.float32)])
 
     # ---------------------------------------------------------------- gym API
     def reset(self, *, seed: int | None = None, options: dict | None = None):
@@ -95,11 +110,15 @@ class TradingEnv(gym.Env):
             self.t = int(self.np_random.integers(self.first_t, latest_start + 1))
             self.end_t = min(self.t + self.episode_length, self.last_t)
         self.position = 0.0
+        self.lock = 0  # days the current position must still be held
         self.value = 1.0  # portfolio value, starting from 1 unit of cash
         return self._obs(), {}
 
     def step(self, action: int):
         target = float(self.positions[int(action)])
+        if self.lock > 0:  # still inside the minimum holding period
+            target = self.position
+            self.lock -= 1
         t = self.t
         value_before = self.value
 
@@ -111,12 +130,15 @@ class TradingEnv(gym.Env):
         # 3) intraday: the new position is carried from open[t+1] to close[t+1]
         self.value *= 1.0 + target * (self.close[t + 1] / self.open[t + 1] - 1.0)
 
+        if traded > 0 and self.min_hold > 0:
+            self.lock = self.min_hold - 1
         self.position = target
         self.t = t + 1
 
         terminated = self.value <= 0.0  # wiped out: a true ending
         truncated = (self.t >= self.end_t) and not terminated  # ran out of time
         reward = -10.0 if terminated else float(np.log(self.value / value_before))
+        reward -= self.switch_penalty * traded
 
         info = {
             "date": self.dates[self.t],

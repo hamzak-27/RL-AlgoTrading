@@ -23,6 +23,8 @@ class RunConfig:
     window: int = 10
     fee: float = 0.001
     episode_length: int = 365
+    switch_penalty: float = 0.0  # reward penalty per unit of position changed
+    min_hold: int = 0            # minimum days to hold a position after a trade
     dqn: dict = field(default_factory=dict)  # overrides for DQNConfig
 
     def to_dict(self) -> dict:
@@ -33,7 +35,8 @@ def make_env(cfg: RunConfig, period: str, episode_length: int | None = None) -> 
     df = load(Path("data") / f"{cfg.symbol}.csv")
     start, end = Split().periods(df)[period]
     return TradingEnv(df, window=cfg.window, fee=cfg.fee,
-                      episode_length=episode_length, start=start, end=end)
+                      episode_length=episode_length, start=start, end=end,
+                      switch_penalty=cfg.switch_penalty, min_hold=cfg.min_hold)
 
 
 SMOOTH_WINDOW = 5
