@@ -1,7 +1,39 @@
-# RL-AlgoTrading
+# rltrader
 
-Overview: This project focuses on utilizing Reinforcement Learning (RL) techniques, specifically Deep Q-Network (DQN), for algorithmic trading. The algorithm learns to make trading decisions based on historical Bitcoin data, aiming to maximize profit by autonomously deciding whether to buy, sell, or hold stocks.
+Deep reinforcement learning for single-asset trading, rebuilt from a 2023 notebook
+(kept in `legacy/`) with the aim of honest, reproducible results.
 
-Reinforcement Learning (RL): Reinforcement Learning is a type of machine learning where an agent learns to make decisions by interacting with an environment. It learns through trial and error, receiving feedback in the form of rewards or penalties for its actions. RL aims to find an optimal policy that maximizes cumulative rewards over time.
+## Setup
 
-Deep Q-Network (DQN): Deep Q-Network is a deep learning model used in RL, particularly in discrete action spaces. It combines Q-learning, a popular RL algorithm, with deep neural networks to approximate the Q-function, which represents the expected cumulative reward for taking a particular action in a given state.
+```bash
+python -m venv .venv --system-site-packages
+.venv/Scripts/python -m pip install -e .[dev]
+```
+
+## Run
+
+```bash
+.venv/Scripts/python scripts/download_data.py BTC-USD   # daily bars -> data/BTC-USD.csv
+.venv/Scripts/python -m pytest                          # check the simulator
+.venv/Scripts/python scripts/train.py --seeds 5         # train + evaluate -> results/BTC-USD/
+```
+
+## Layout
+
+| File | What it does |
+|---|---|
+| `src/rltrader/data.py` | Download/load bars (always oldest to newest), chronological train/val/test split |
+| `src/rltrader/features.py` | Backward-looking, scaled features (returns, volatility, trend, RSI, volume) |
+| `src/rltrader/env.py` | Gymnasium environment: target-position actions, next-open execution, fees, log-return reward |
+| `src/rltrader/dqn.py` | Double DQN with replay buffer and target network |
+| `src/rltrader/evaluate.py` | Episode runner, performance metrics, baselines |
+| `scripts/train.py` | Multi-seed training, validation checkpointing, test report and chart |
+| `tests/test_env.py` | Accounting and no-look-ahead checks |
+
+## Periods
+
+| Period | Dates | Used for |
+|---|---|---|
+| train | start to 2021-12-31 | learning |
+| val | 2022-01-01 to 2023-12-31 | choosing the best checkpoint |
+| test | 2024-01-01 onwards | final reported numbers only |
