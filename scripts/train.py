@@ -1,145 +1,148 @@
-"""Train DQN agents and compare them with baselines on unseen data.
+"""Train DQN agents over several seeds and compare them with baselines.
 
-Usage:  python scripts/train.py --symbol BTC-USD --seeds 5 --steps 60000
+Usage:
+    python scripts/train.py --name baseline --seeds 10
+    python scripts/train.py --name small_net --seeds 10 --dqn hidden=32 lr=1e-4
 
-For each seed:
+For each seed (run in parallel):
   1. train on the training period, in random one-year episodes;
-  2. every few thousand steps, test the greedy policy on the validation
-     period and keep the best checkpoint;
-  3. run that checkpoint once on the test period.
+  2. every few thousand steps, test the greedy policy on the validation period;
+  3. report three ways of choosing the checkpoint: "last" (the final model, no
+     choosing, so its validation score is unbiased), "smoothed" (end of the
+     best run of 5 evaluations) and "best" (single highest score, flattering).
 Baselines run through the same environment with the same fees.
+
+Results go to results/<symbol>/<name>/. Validation numbers are printed;
+test numbers are saved but only printed with --show-test, so that day-to-day
+decisions are not made by peeking at the test period.
 """
 import argparse
+import ast
 import json
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import numpy as np
+import matplotlib.ticker
 import pandas as pd
 
-from rltrader.data import Split, load
-from rltrader.dqn import DQNAgent, DQNConfig
-from rltrader.env import TradingEnv
-from rltrader.evaluate import (
-    agent_policy, buy_and_hold, metrics, random_policy, run_policy, sma_crossover,
-)
+from rltrader.evaluate import buy_and_hold, metrics, random_policy, run_policy, sma_crossover
+from rltrader.experiment import RunConfig, make_env, train_seed
+from rltrader.stats import bootstrap_ci, iqm
 
-p = argparse.ArgumentParser()
-p.add_argument("--symbol", default="BTC-USD")
-p.add_argument("--seeds", type=int, default=5)
-p.add_argument("--steps", type=int, default=60_000)
-p.add_argument("--eval-every", type=int, default=2_000)
-p.add_argument("--window", type=int, default=10)
-p.add_argument("--fee", type=float, default=0.001)
-p.add_argument("--episode-length", type=int, default=365)
-p.add_argument("--out", default="results")
-args = p.parse_args()
-
-out = Path(args.out) / args.symbol
-out.mkdir(parents=True, exist_ok=True)
-
-df = load(Path("data") / f"{args.symbol}.csv")
-periods = Split().periods(df)
+SHOWN = ["log_return", "sharpe", "max_drawdown", "exposure", "turnover"]
+RULES = ["last", "smoothed", "best"]  # checkpoint-selection rules; "last" is the headline
 
 
-def make_env(period: str, episode_length=None) -> TradingEnv:
-    start, end = periods[period]
-    return TradingEnv(df, window=args.window, fee=args.fee,
-                      episode_length=episode_length, start=start, end=end)
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--name", required=True, help="label for this variant, e.g. baseline")
+    p.add_argument("--symbol", default="BTC-USD")
+    p.add_argument("--seeds", type=int, default=10)
+    p.add_argument("--workers", type=int, default=4)
+    p.add_argument("--steps", type=int, default=60_000)
+    p.add_argument("--eval-every", type=int, default=2_000)
+    p.add_argument("--window", type=int, default=10)
+    p.add_argument("--fee", type=float, default=0.001)
+    p.add_argument("--episode-length", type=int, default=365)
+    p.add_argument("--dqn", nargs="*", default=[], metavar="KEY=VALUE",
+                   help="DQNConfig overrides, e.g. hidden=32 lr=1e-4")
+    p.add_argument("--show-test", action="store_true")
+    return p.parse_args()
 
 
-def train_one(seed: int):
-    train_env, val_env = make_env("train", args.episode_length), make_env("val")
-    cfg = DQNConfig(eps_decay_steps=args.steps // 2)
-    agent = DQNAgent(train_env.observation_space.shape[0], train_env.action_space.n, cfg, seed)
-    ckpt = out / f"dqn_seed{seed}.pt"
-    best_val, curve = -np.inf, []
-
-    obs, _ = train_env.reset(seed=seed)
-    for step in range(1, args.steps + 1):
-        action = agent.act(obs)
-        next_obs, reward, terminated, truncated, _ = train_env.step(action)
-        agent.observe(obs, action, reward, next_obs, terminated)
-        obs = next_obs
-        if terminated or truncated:
-            obs, _ = train_env.reset()
-
-        if step % args.eval_every == 0:
-            val_log_return = float(np.log(run_policy(val_env, agent_policy(agent))["value"].iloc[-1]))
-            curve.append({"seed": seed, "step": step, "val_log_return": val_log_return,
-                          "epsilon": agent.epsilon})
-            if val_log_return > best_val:
-                best_val = val_log_return
-                agent.save(ckpt)
-
-    agent.load(ckpt)
-    print(f"seed {seed}: best validation log-return {best_val:+.3f}")
-    return agent, curve
+def summarise(dqn: pd.DataFrame, baselines: pd.DataFrame) -> pd.DataFrame:
+    """One row per strategy; DQN shown as IQM with a 95% confidence interval."""
+    rows = {name: {m: f"{row[m]:.3f}" for m in SHOWN} for name, row in baselines.iterrows()}
+    for rule in RULES:
+        d = dqn[dqn.selection == rule]
+        rows[f"DQN {rule} (IQM of {len(d)} seeds)"] = {m: f"{iqm(d[m]):.3f}" for m in SHOWN}
+        rows[f"DQN {rule} 95% interval"] = {
+            m: "[{:.3f}, {:.3f}]".format(*bootstrap_ci(d[m])) for m in SHOWN
+        }
+    return pd.DataFrame(rows).T
 
 
-# ------------------------------------------------------------------- run it
-records: dict[str, pd.DataFrame] = {}
-rows, curves = [], []
+def plot_equity(equity: pd.DataFrame, baselines: dict, title: str, path: Path) -> None:
+    INK, MUTED, GRID, SURFACE = "#0b0b0b", "#898781", "#e1e0d9", "#fcfcfb"
+    BLUE, ORANGE, AQUA = "#2a78d6", "#eb6834", "#1baf7a"
+    fig, ax = plt.subplots(figsize=(11, 5.5), facecolor=SURFACE)
+    ax.set_facecolor(SURFACE)
+    for col in equity:  # individual seeds, faint
+        ax.plot(equity.index, equity[col], color=BLUE, lw=0.8, alpha=0.3)
+    ax.plot(equity.index, equity.mean(axis=1), color=BLUE, lw=2,
+            label=f"DQN (mean of {equity.shape[1]} seeds)")
+    for (label, s), color in zip(baselines.items(), (ORANGE, AQUA)):
+        ax.plot(s.index, s, color=color, lw=2, label=label)
+    ax.axhline(1.0, color="#c3c2b7", lw=1)
+    ax.set_yscale("log")
+    ax.yaxis.set_major_locator(matplotlib.ticker.FixedLocator([0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 6]))
+    ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:g}×"))
+    ax.yaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
+    ax.grid(axis="y", color=GRID, lw=0.8)
+    ax.tick_params(colors=MUTED, length=0, which="both")
+    for side in ax.spines.values():
+        side.set_visible(False)
+    ax.set_title(title, color=INK, loc="left", fontsize=12)
+    ax.legend(frameon=False, labelcolor="#52514e", loc="upper left")
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
 
-test_env = make_env("test")
-for name, policy in [
-    ("Buy & hold", buy_and_hold),
-    ("SMA 20/50", sma_crossover()),
-    ("Random", random_policy(0)),
-]:
-    records[name] = run_policy(test_env, policy)
-    rows.append({"strategy": name, "seed": "-", **metrics(records[name])})
 
-for seed in range(args.seeds):
-    agent, curve = train_one(seed)
-    curves += curve
-    records[f"DQN seed {seed}"] = run_policy(test_env, agent_policy(agent))
-    rows.append({"strategy": "DQN", "seed": seed, **metrics(records[f"DQN seed {seed}"])})
+def main():
+    args = parse_args()
+    dqn_overrides = {k: ast.literal_eval(v) for k, v in (kv.split("=", 1) for kv in args.dqn)}
+    cfg = RunConfig(symbol=args.symbol, steps=args.steps, eval_every=args.eval_every,
+                    window=args.window, fee=args.fee, episode_length=args.episode_length,
+                    dqn=dqn_overrides)
+    out = Path("results") / args.symbol / args.name
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "config.json").write_text(json.dumps({**cfg.to_dict(), "seeds": args.seeds}, indent=2))
 
-table = pd.DataFrame(rows)
-table.to_csv(out / "test_metrics.csv", index=False)
-pd.DataFrame(curves).to_csv(out / "validation_curves.csv", index=False)
-pd.DataFrame({k: v["value"] for k, v in records.items()}).to_csv(out / "test_equity.csv")
-(out / "config.json").write_text(json.dumps({**vars(args), "periods": periods}, indent=2))
+    # ---- baselines, on both periods
+    baseline_tables, baseline_equity = {}, {}
+    for period in ("val", "test"):
+        policies = {"Buy & hold": buy_and_hold, "SMA 20/50": sma_crossover(),
+                    "Random": random_policy(0)}
+        env = make_env(cfg, period)
+        records = {name: run_policy(env, pol) for name, pol in policies.items()}
+        baseline_tables[period] = pd.DataFrame({n: metrics(r) for n, r in records.items()}).T
+        baseline_tables[period].to_csv(out / f"baselines_{period}.csv")
+        baseline_equity[period] = {n: records[n]["value"] for n in ("Buy & hold", "SMA 20/50")}
 
-numeric = table.drop(columns=["seed"]).groupby("strategy", sort=False)
-summary = numeric.mean().round(3)
-summary["sharpe_std"] = numeric["sharpe"].std().round(3)
-print(f"\nTest period {periods['test'][0]} -> {periods['test'][1]}, fee {args.fee:.2%} per trade")
-print(summary.to_string())
-print("\nPer-seed DQN:")
-print(table[table.strategy == "DQN"].drop(columns="strategy").round(3).to_string(index=False))
+    # ---- train all seeds in parallel
+    with ProcessPoolExecutor(max_workers=args.workers) as pool:
+        futures = [pool.submit(train_seed, cfg, seed, str(out)) for seed in range(args.seeds)]
+        results = []
+        for f in futures:
+            r = f.result()
+            results.append(r)
+            print(f"seed {r['seed']} done: validation log-return "
+                  + ", ".join(f"{rule} {r['val'][rule]['log_return']:+.3f}" for rule in RULES),
+                  flush=True)
 
-# --------------------------------------------------------------------- chart
-INK, MUTED, GRID, SURFACE = "#0b0b0b", "#898781", "#e1e0d9", "#fcfcfb"
-BLUE, ORANGE, AQUA = "#2a78d6", "#eb6834", "#1baf7a"
+    tables = {}
+    for period in ("val", "test"):
+        tables[period] = pd.DataFrame([{"seed": r["seed"], "selection": rule, **r[period][rule]}
+                                       for r in results for rule in RULES])
+        tables[period].to_csv(out / f"{period}_metrics.csv", index=False)
+    pd.DataFrame([row for r in results for row in r["curve"]]).to_csv(
+        out / "validation_curves.csv", index=False)
+    equity = pd.DataFrame({f"seed {r['seed']}": r["test_equity"]["last"] for r in results})
+    equity.to_csv(out / "test_equity.csv")
+    plot_equity(equity, baseline_equity["test"],
+                f"{args.symbol} / {args.name}: portfolio value on the test period "
+                f"(start = 1×, {args.fee:.1%} fee per trade)", out / "test_equity.png")
 
-fig, ax = plt.subplots(figsize=(11, 5.5), facecolor=SURFACE)
-ax.set_facecolor(SURFACE)
-dqn = pd.DataFrame({k: v["value"] for k, v in records.items() if k.startswith("DQN")})
-for col in dqn:  # individual seeds, faint
-    ax.plot(dqn.index, dqn[col], color=BLUE, lw=0.8, alpha=0.3)
-series = [
-    (f"DQN (mean of {args.seeds} seeds)", dqn.mean(axis=1), BLUE),
-    ("Buy & hold", records["Buy & hold"]["value"], ORANGE),
-    ("SMA 20/50", records["SMA 20/50"]["value"], AQUA),
-]
-for label, s, color in series:
-    ax.plot(s.index, s, color=color, lw=2, label=label)
-ax.axhline(1.0, color="#c3c2b7", lw=1)
-ax.set_yscale("log")
-ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:g}×"))
-ax.yaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
-ax.grid(axis="y", color=GRID, lw=0.8)
-ax.tick_params(colors=MUTED, length=0)
-for side in ax.spines.values():
-    side.set_visible(False)
-ax.set_title(f"{args.symbol}: portfolio value on the test period (start = 1×, "
-             f"{args.fee:.1%} fee per trade)", color=INK, loc="left", fontsize=12)
-ax.legend(frameon=False, labelcolor="#52514e", loc="upper left")
-fig.tight_layout()
-fig.savefig(out / "test_equity.png", dpi=150)
-print(f"\nSaved results to {out}")
+    for period in ("val", "test") if args.show_test else ("val",):
+        print(f"\n{period.upper()} period, fee {args.fee:.2%} per trade")
+        print(summarise(tables[period], baseline_tables[period]).to_string())
+    print(f"\nSaved to {out}")
+
+
+if __name__ == "__main__":  # required on Windows for parallel workers
+    main()

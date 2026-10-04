@@ -42,6 +42,8 @@ def metrics(record: pd.DataFrame) -> dict[str, float]:
     max_dd = (value / value.cummax() - 1.0).min()
     return {
         "total_return": total,
+        # log of final wealth: what the agent's rewards add up to
+        "log_return": float(np.log(value.iloc[-1] / value.iloc[0])),
         "cagr": cagr,
         # return per unit of risk (0 if the strategy never held anything)
         "sharpe": rets.mean() / std * ann if std > 0 else 0.0,
