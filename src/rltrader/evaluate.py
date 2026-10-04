@@ -44,6 +44,8 @@ def metrics(record: pd.DataFrame) -> dict[str, float]:
         "total_return": total,
         # log of final wealth: what the agent's rewards add up to
         "log_return": float(np.log(value.iloc[-1] / value.iloc[0])),
+        # the same per year, so periods of different length can be compared
+        "log_return_per_year": float(np.log(value.iloc[-1] / value.iloc[0]) / years) if years > 0 else 0.0,
         "cagr": cagr,
         # return per unit of risk (0 if the strategy never held anything)
         "sharpe": rets.mean() / std * ann if std > 0 else 0.0,

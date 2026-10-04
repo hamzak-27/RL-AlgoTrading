@@ -20,7 +20,7 @@ p = argparse.ArgumentParser()
 p.add_argument("a")
 p.add_argument("b")
 p.add_argument("--symbol", default="BTC-USD")
-p.add_argument("--period", default="val", choices=["val", "test"])
+p.add_argument("--period", default="val", choices=["train", "val", "test"])
 args = p.parse_args()
 
 root = Path("results") / args.symbol
@@ -36,7 +36,7 @@ a, b = read(args.a), read(args.b)
 
 fmt = lambda x: "{:.3f} [{:.3f}, {:.3f}]".format(iqm(x), *bootstrap_ci(x))
 rows = []
-for metric in ["log_return", "sharpe", "max_drawdown", "turnover"]:
+for metric in ["log_return_per_year", "sharpe", "max_drawdown", "turnover"]:
     c = compare(a[metric], b[metric])
     rows.append({
         "metric": metric,

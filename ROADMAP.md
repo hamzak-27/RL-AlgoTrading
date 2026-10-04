@@ -26,9 +26,12 @@ validation period; the test period is looked at only when a phase is finished.
 
 ## Phase B: fix the agent's behaviour
 
-- [ ] **3. Stop the overtrading.** Try a switching penalty in the reward, a minimum
-  holding period, and realistic cost levels. *Target: trades fall from ~370 to well
-  under 100 with no loss in validation return.*
+- [x] **3. Stop the overtrading.** Tried a switching penalty in the reward (0.002,
+  0.005, 0.01) and a minimum holding period (5, 10 days). *Result (validation, "last"
+  rule, 10 seeds): the penalty cut trades only from 286 to 211 with no clear gain in
+  return. A 10-day minimum hold cut trades to 56 and moved log return from -0.576 to
+  +0.047, a clear improvement. Kept: `--min-hold 10`. Caveat: random agents also improve
+  under the same rule (-0.433 to -0.207), so most of the gain is fees saved, not skill.*
 - [ ] **4. Reduce overfitting.** Smaller network, weight decay, layer normalisation,
   shorter training, noise added to features. *Target: validation score stops getting
   worse during training.*

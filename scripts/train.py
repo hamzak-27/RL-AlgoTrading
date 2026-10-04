@@ -34,6 +34,7 @@ from rltrader.experiment import RunConfig, make_env, train_seed
 from rltrader.stats import bootstrap_ci, iqm
 
 SHOWN = ["log_return", "sharpe", "max_drawdown", "exposure", "turnover"]
+N_RANDOM = 100
 RULES = ["last", "smoothed", "best"]  # checkpoint-selection rules; "last" is the headline
 
 
@@ -108,14 +109,19 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     (out / "config.json").write_text(json.dumps({**cfg.to_dict(), "seeds": args.seeds}, indent=2))
 
-    # ---- baselines, on both periods
+    # ---- baselines, on every period
     baseline_tables, baseline_equity = {}, {}
-    for period in ("val", "test"):
-        policies = {"Buy & hold": buy_and_hold, "SMA 20/50": sma_crossover(),
-                    "Random": random_policy(0)}
+    for period in ("train", "val", "test"):
+        policies = {"Buy & hold": buy_and_hold, "SMA 20/50": sma_crossover()}
         env = make_env(cfg, period)
         records = {name: run_policy(env, pol) for name, pol in policies.items()}
-        baseline_tables[period] = pd.DataFrame({n: metrics(r) for n, r in records.items()}).T
+        rows = {n: metrics(r) for n, r in records.items()}
+        # One random agent is as noisy as one DQN seed, so use many: this row is
+        # "what you get from the trading rules alone, with no skill at all".
+        randoms = pd.DataFrame([metrics(run_policy(env, random_policy(s)))
+                                for s in range(N_RANDOM)])
+        rows[f"Random (IQM of {N_RANDOM})"] = {m: iqm(randoms[m]) for m in randoms}
+        baseline_tables[period] = pd.DataFrame(rows).T
         baseline_tables[period].to_csv(out / f"baselines_{period}.csv")
         baseline_equity[period] = {n: records[n]["value"] for n in ("Buy & hold", "SMA 20/50")}
 
@@ -131,7 +137,7 @@ def main():
                   flush=True)
 
     tables = {}
-    for period in ("val", "test"):
+    for period in ("train", "val", "test"):
         tables[period] = pd.DataFrame([{"seed": r["seed"], "selection": rule, **r[period][rule]}
                                        for r in results for rule in RULES])
         tables[period].to_csv(out / f"{period}_metrics.csv", index=False)
@@ -146,6 +152,16 @@ def main():
     for period in ("val", "test") if args.show_test else ("val",):
         print(f"\n{period.upper()} period, fee {args.fee:.2%} per trade")
         print(summarise(tables[period], baseline_tables[period]).to_string())
+    # Overfitting check: how far ahead of buy-and-hold is the agent on the data it
+    # learned from, versus on data it has never seen? Measured against buy-and-hold
+    # because the training years were a much stronger market than the validation years.
+    edge = {}
+    for period in ("train", "val"):
+        dqn = iqm(tables[period][tables[period].selection == "last"]["log_return_per_year"])
+        edge[period] = dqn - baseline_tables[period].loc["Buy & hold", "log_return_per_year"]
+    print("\nOverfitting check (last rule, log return per year vs buy-and-hold): "
+          f"train {edge['train']:+.3f}, validation {edge['val']:+.3f}, "
+          f"gap {edge['train'] - edge['val']:.3f}")
     print(f"\nSaved to {out}")
 
 

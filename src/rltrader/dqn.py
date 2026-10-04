@@ -37,6 +37,10 @@ class DQNConfig:
     hidden: int = 64
     grad_clip: float = 10.0
     reward_scale: float = 100.0      # daily log-returns are ~0.01; bring them to ~1
+    # --- regularisation: ways to stop the network memorising the training years
+    weight_decay: float = 0.0        # pulls weights towards zero (simpler functions)
+    layer_norm: bool = False         # normalises each hidden layer's activations
+    obs_noise: float = 0.0           # random noise added to states when learning
 
 
 class ReplayBuffer:
@@ -67,11 +71,12 @@ class ReplayBuffer:
 
 
 class QNetwork(nn.Module):
-    def __init__(self, obs_dim: int, n_actions: int, hidden: int):
+    def __init__(self, obs_dim: int, n_actions: int, hidden: int, layer_norm: bool = False):
         super().__init__()
+        norm = (lambda: nn.LayerNorm(hidden)) if layer_norm else nn.Identity
         self.net = nn.Sequential(
-            nn.Linear(obs_dim, hidden), nn.ReLU(),
-            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(obs_dim, hidden), norm(), nn.ReLU(),
+            nn.Linear(hidden, hidden), norm(), nn.ReLU(),
             nn.Linear(hidden, n_actions),
         )
 
@@ -86,10 +91,14 @@ class DQNAgent:
         self.rng = np.random.default_rng(seed)
         torch.manual_seed(seed)
 
-        self.q = QNetwork(obs_dim, n_actions, self.cfg.hidden)
-        self.q_target = QNetwork(obs_dim, n_actions, self.cfg.hidden)
+        self.q = QNetwork(obs_dim, n_actions, self.cfg.hidden, self.cfg.layer_norm)
+        self.q_target = QNetwork(obs_dim, n_actions, self.cfg.hidden, self.cfg.layer_norm)
         self.q_target.load_state_dict(self.q.state_dict())
-        self.optim = torch.optim.Adam(self.q.parameters(), lr=self.cfg.lr)
+        if self.cfg.weight_decay > 0:
+            self.optim = torch.optim.AdamW(self.q.parameters(), lr=self.cfg.lr,
+                                           weight_decay=self.cfg.weight_decay)
+        else:
+            self.optim = torch.optim.Adam(self.q.parameters(), lr=self.cfg.lr)
         self.buffer = ReplayBuffer(self.cfg.buffer_size, obs_dim, self.rng)
         self.steps = 0
 
@@ -118,6 +127,11 @@ class DQNAgent:
     def _learn(self) -> float:
         cfg = self.cfg
         obs, actions, rewards, next_obs, terminated = self.buffer.sample(cfg.batch_size)
+        if cfg.obs_noise > 0:
+            # The exact feature values of a past day will never repeat, so the
+            # network should not rely on them to the last decimal.
+            obs = obs + cfg.obs_noise * torch.randn_like(obs)
+            next_obs = next_obs + cfg.obs_noise * torch.randn_like(next_obs)
 
         # What the network currently predicts for the actions actually taken.
         q_pred = self.q(obs).gather(1, actions.unsqueeze(1)).squeeze(1)

@@ -69,6 +69,7 @@ def train_seed(cfg: RunConfig, seed: int, out_dir: str) -> dict:
     torch.set_num_threads(1)  # one core per worker, so workers do not fight
     train_env = make_env(cfg, "train", cfg.episode_length)
     val_env, test_env = make_env(cfg, "val"), make_env(cfg, "test")
+    train_eval_env = make_env(cfg, "train")  # the whole training period, start to end
 
     dqn_cfg = DQNConfig(**{"eps_decay_steps": cfg.steps // 2, **cfg.dqn})
     agent = DQNAgent(train_env.observation_space.shape[0], train_env.action_space.n, dqn_cfg, seed)
@@ -92,12 +93,15 @@ def train_seed(cfg: RunConfig, seed: int, out_dir: str) -> dict:
     ckpt_dir = Path(out_dir) / "checkpoints"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     chosen = choose_checkpoints([c["val_log_return"] for c in curve])
-    result = {"seed": seed, "curve": curve, "val": {}, "test": {}, "test_equity": {}}
+    result = {"seed": seed, "curve": curve, "train": {}, "val": {}, "test": {}, "test_equity": {}}
     for rule, i in chosen.items():
         agent.q.load_state_dict(snapshots[i])
         agent.save(ckpt_dir / f"seed{seed}_{rule}.pt")
         test_record = run_policy(test_env, agent_policy(agent))
         extra = {"chosen_step": curve[i]["step"]}
+        # How the agent does on the very data it learned from. Much better here
+        # than on validation = it memorised rather than learned (overfitting).
+        result["train"][rule] = {**extra, **metrics(run_policy(train_eval_env, agent_policy(agent)))}
         result["val"][rule] = {**extra, **metrics(run_policy(val_env, agent_policy(agent)))}
         result["test"][rule] = {**extra, **metrics(test_record)}
         result["test_equity"][rule] = test_record["value"]
