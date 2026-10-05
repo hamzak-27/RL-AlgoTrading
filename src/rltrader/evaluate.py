@@ -12,8 +12,6 @@ import pandas as pd
 
 from .env import TradingEnv
 
-PERIODS_PER_YEAR = 365  # crypto trades every day; use 252 for stocks
-
 Policy = Callable[[np.ndarray, TradingEnv], int]
 
 
@@ -33,12 +31,15 @@ def metrics(record: pd.DataFrame) -> dict[str, float]:
     """Standard performance numbers from a portfolio-value series."""
     value = record["value"]
     rets = value.pct_change().dropna()
-    years = len(rets) / PERIODS_PER_YEAR
+    # Measured from the calendar, so it is right for crypto (365 bars a year)
+    # and for stocks (about 252) alike.
+    years = (record.index[-1] - record.index[0]).days / 365.25
+    periods_per_year = len(rets) / years if years > 0 else 0.0
     total = value.iloc[-1] / value.iloc[0] - 1.0
     cagr = (value.iloc[-1] / value.iloc[0]) ** (1 / years) - 1.0 if years > 0 else 0.0
     std = rets.std()
     downside = rets[rets < 0].std()
-    ann = np.sqrt(PERIODS_PER_YEAR)
+    ann = np.sqrt(periods_per_year)
     max_dd = (value / value.cummax() - 1.0).min()
     return {
         "total_return": total,

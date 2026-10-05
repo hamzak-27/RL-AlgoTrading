@@ -147,3 +147,32 @@ class TradingEnv(gym.Env):
             "traded": traded,
         }
         return self._obs(), reward, terminated, truncated, info
+
+
+class MultiAssetEnv(gym.Env):
+    """Training on several assets at once: every episode is played on one
+    asset picked at random.
+
+    The agent never learns which asset it is on. It only sees the features,
+    which are scaled the same way for every asset, so whatever it learns has
+    to work across all of them. That is the point: a pattern that only exists
+    in one coin's history is more likely an accident than a pattern that
+    shows up in eight.
+    """
+
+    metadata = {"render_modes": []}
+
+    def __init__(self, envs: list[TradingEnv]):
+        super().__init__()
+        self.envs = envs
+        self.current = envs[0]
+        self.action_space = envs[0].action_space
+        self.observation_space = envs[0].observation_space
+
+    def reset(self, *, seed: int | None = None, options: dict | None = None):
+        super().reset(seed=seed)
+        self.current = self.envs[int(self.np_random.integers(len(self.envs)))]
+        return self.current.reset(seed=int(self.np_random.integers(2**31 - 1)))
+
+    def step(self, action: int):
+        return self.current.step(action)

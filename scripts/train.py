@@ -41,7 +41,12 @@ RULES = ["last", "smoothed", "best"]  # checkpoint-selection rules; "last" is th
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--name", required=True, help="label for this variant, e.g. baseline")
-    p.add_argument("--symbol", default="BTC-USD")
+    p.add_argument("--symbol", default="BTC-USD",
+                   help="main asset: checkpoints and headline numbers")
+    p.add_argument("--train-symbols", nargs="*", default=[],
+                   help="assets to learn from (default: just --symbol)")
+    p.add_argument("--eval-symbols", nargs="*", default=[],
+                   help="assets to also score the final agent on (validation period)")
     p.add_argument("--seeds", type=int, default=10)
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--steps", type=int, default=60_000)
@@ -69,6 +74,43 @@ def summarise(dqn: pd.DataFrame, baselines: pd.DataFrame) -> pd.DataFrame:
             m: "[{:.3f}, {:.3f}]".format(*bootstrap_ci(d[m])) for m in SHOWN
         }
     return pd.DataFrame(rows).T
+
+
+def report_assets(cfg, results, out: Path) -> pd.DataFrame:
+    """Score the final agents on every evaluation asset and save two files:
+    one row per (seed, asset), and one row per seed averaged over assets."""
+    reference = {}
+    for s in cfg.eval_symbols:
+        env = make_env(cfg, "val", symbol=s)
+        bh = metrics(run_policy(env, buy_and_hold))["log_return_per_year"]
+        rnd = iqm([metrics(run_policy(env, random_policy(i)))["log_return_per_year"]
+                   for i in range(N_RANDOM)])
+        reference[s] = {"buy_hold": bh, "random": rnd}
+
+    rows = []
+    for r in results:
+        for s, m in r["val_assets"].items():
+            rows.append({"seed": r["seed"], "symbol": s, **m,
+                         # edge = how far ahead of a no-skill agent under the same rules
+                         "edge_vs_random": m["log_return_per_year"] - reference[s]["random"],
+                         "edge_vs_buy_hold": m["log_return_per_year"] - reference[s]["buy_hold"]})
+    long = pd.DataFrame(rows)
+    long.to_csv(out / "val_assets.csv", index=False)
+
+    per_seed = long.drop(columns="symbol").groupby("seed").mean().reset_index()
+    per_seed.insert(1, "selection", "last")
+    per_seed.to_csv(out / "val_multi_metrics.csv", index=False)
+
+    table = long.groupby("symbol", sort=False).agg(
+        dqn=("log_return_per_year", iqm), edge_vs_random=("edge_vs_random", iqm),
+        trades=("turnover", iqm))
+    table.insert(1, "random", [reference[s]["random"] for s in table.index])
+    table.insert(2, "buy_hold", [reference[s]["buy_hold"] for s in table.index])
+    lo, hi = bootstrap_ci(per_seed["edge_vs_random"])
+    table.loc["MEAN over assets"] = table.mean()
+    print(f"\nMean edge over random across assets: {iqm(per_seed['edge_vs_random']):+.3f} "
+          f"[{lo:+.3f}, {hi:+.3f}] (IQM over seeds, 95% interval)")
+    return table
 
 
 def plot_equity(equity: pd.DataFrame, baselines: dict, title: str, path: Path) -> None:
@@ -101,7 +143,8 @@ def plot_equity(equity: pd.DataFrame, baselines: dict, title: str, path: Path) -
 def main():
     args = parse_args()
     dqn_overrides = {k: ast.literal_eval(v) for k, v in (kv.split("=", 1) for kv in args.dqn)}
-    cfg = RunConfig(symbol=args.symbol, steps=args.steps, eval_every=args.eval_every,
+    cfg = RunConfig(symbol=args.symbol, train_symbols=tuple(args.train_symbols),
+                    eval_symbols=tuple(args.eval_symbols), steps=args.steps, eval_every=args.eval_every,
                     window=args.window, fee=args.fee, episode_length=args.episode_length,
                     switch_penalty=args.switch_penalty, min_hold=args.min_hold,
                     dqn=dqn_overrides)
@@ -152,6 +195,11 @@ def main():
     for period in ("val", "test") if args.show_test else ("val",):
         print(f"\n{period.upper()} period, fee {args.fee:.2%} per trade")
         print(summarise(tables[period], baseline_tables[period]).to_string())
+    if cfg.eval_symbols:
+        assets = report_assets(cfg, results, out)
+        print("\nVALIDATION period on every evaluation asset (last rule, log return per year)")
+        print(assets.round(3).to_string())
+
     # Overfitting check: how far ahead of buy-and-hold is the agent on the data it
     # learned from, versus on data it has never seen? Measured against buy-and-hold
     # because the training years were a much stronger market than the validation years.

@@ -3,6 +3,8 @@
 Usage:  python scripts/compare.py baseline small_net [--symbol BTC-USD] [--period val]
         python scripts/compare.py baseline:last baseline:best     # same run, two selection rules
 
+        python scripts/compare.py window3 multi_crypto --period val_multi   # all eval assets
+
 Each run is "name" or "name:rule", where rule is last (default), smoothed or best.
 
 For each metric: the IQM of each run, the difference (B minus A) with a 95%
@@ -20,7 +22,7 @@ p = argparse.ArgumentParser()
 p.add_argument("a")
 p.add_argument("b")
 p.add_argument("--symbol", default="BTC-USD")
-p.add_argument("--period", default="val", choices=["train", "val", "test"])
+p.add_argument("--period", default="val", choices=["train", "val", "test", "val_multi"])
 args = p.parse_args()
 
 root = Path("results") / args.symbol
@@ -36,7 +38,10 @@ a, b = read(args.a), read(args.b)
 
 fmt = lambda x: "{:.3f} [{:.3f}, {:.3f}]".format(iqm(x), *bootstrap_ci(x))
 rows = []
-for metric in ["log_return_per_year", "sharpe", "max_drawdown", "turnover"]:
+METRICS = ["log_return_per_year", "sharpe", "max_drawdown", "turnover"]
+if args.period == "val_multi":  # averaged over all evaluation assets
+    METRICS = ["edge_vs_random", "edge_vs_buy_hold"] + METRICS
+for metric in METRICS:
     c = compare(a[metric], b[metric])
     rows.append({
         "metric": metric,

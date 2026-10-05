@@ -11,13 +11,15 @@ import torch
 
 from .data import Split, load
 from .dqn import DQNAgent, DQNConfig
-from .env import TradingEnv
+from .env import MultiAssetEnv, TradingEnv
 from .evaluate import agent_policy, metrics, run_policy
 
 
 @dataclass
 class RunConfig:
-    symbol: str = "BTC-USD"
+    symbol: str = "BTC-USD"       # main asset: checkpoints and headline numbers
+    train_symbols: tuple = ()     # assets to learn from (empty = just ``symbol``)
+    eval_symbols: tuple = ()      # extra assets to score the final agent on
     steps: int = 60_000
     eval_every: int = 2_000
     window: int = 10
@@ -31,8 +33,9 @@ class RunConfig:
         return asdict(self)
 
 
-def make_env(cfg: RunConfig, period: str, episode_length: int | None = None) -> TradingEnv:
-    df = load(Path("data") / f"{cfg.symbol}.csv")
+def make_env(cfg: RunConfig, period: str, episode_length: int | None = None,
+             symbol: str | None = None) -> TradingEnv:
+    df = load(Path("data") / f"{symbol or cfg.symbol}.csv")
     start, end = Split().periods(df)[period]
     return TradingEnv(df, window=cfg.window, fee=cfg.fee,
                       episode_length=episode_length, start=start, end=end,
@@ -67,7 +70,12 @@ def train_seed(cfg: RunConfig, seed: int, out_dir: str) -> dict:
     """Train one agent; return its validation curve and val/test results
     for each checkpoint-selection rule."""
     torch.set_num_threads(1)  # one core per worker, so workers do not fight
-    train_env = make_env(cfg, "train", cfg.episode_length)
+    train_symbols = cfg.train_symbols or (cfg.symbol,)
+    if len(train_symbols) == 1:
+        train_env = make_env(cfg, "train", cfg.episode_length, train_symbols[0])
+    else:
+        train_env = MultiAssetEnv([make_env(cfg, "train", cfg.episode_length, s)
+                                   for s in train_symbols])
     val_env, test_env = make_env(cfg, "val"), make_env(cfg, "test")
     train_eval_env = make_env(cfg, "train")  # the whole training period, start to end
 
@@ -105,4 +113,12 @@ def train_seed(cfg: RunConfig, seed: int, out_dir: str) -> dict:
         result["val"][rule] = {**extra, **metrics(run_policy(val_env, agent_policy(agent)))}
         result["test"][rule] = {**extra, **metrics(test_record)}
         result["test_equity"][rule] = test_record["value"]
+
+    # The final model ("last" rule) on every evaluation asset, validation period.
+    # Scoring on several assets gives a much less noisy measurement than one.
+    agent.q.load_state_dict(snapshots[-1])
+    result["val_assets"] = {
+        s: metrics(run_policy(make_env(cfg, "val", symbol=s), agent_policy(agent)))
+        for s in cfg.eval_symbols
+    }
     return result

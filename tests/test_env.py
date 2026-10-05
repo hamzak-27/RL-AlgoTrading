@@ -116,3 +116,28 @@ def test_min_hold_locks_the_position():
         positions.append(info["position"])
     # held for 3 days (the buy day plus two locked days), then the sell goes through
     assert positions == [1.0, 1.0, 1.0, 0.0, 0.0]
+
+
+def test_multi_asset_env_uses_every_asset():
+    from rltrader.env import MultiAssetEnv
+
+    envs = [TradingEnv(make_df(seed=s), episode_length=20) for s in range(3)]
+    multi = MultiAssetEnv(envs)
+    multi.reset(seed=0)
+    seen = set()
+    for _ in range(40):
+        obs, _ = multi.reset()
+        assert obs.shape == multi.observation_space.shape
+        seen.add(envs.index(multi.current))
+        _, _, terminated, truncated, info = multi.step(1)
+        assert info["value"] == multi.current.value
+    assert seen == {0, 1, 2}
+
+
+def test_metrics_use_the_calendar_for_years():
+    # a stock-like series: 5 bars a week for two years, 10% growth per year
+    idx = pd.bdate_range("2020-01-01", "2021-12-31", name="date")
+    years = (idx[-1] - idx[0]).days / 365.25
+    value = 1.1 ** (np.arange(len(idx)) / (len(idx) - 1) * years)
+    record = pd.DataFrame({"value": value, "position": 1.0, "traded": 0.0}, index=idx)
+    assert metrics(record)["cagr"] == pytest.approx(0.10, abs=1e-6)

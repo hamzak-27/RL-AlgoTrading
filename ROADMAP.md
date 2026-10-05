@@ -32,9 +32,14 @@ validation period; the test period is looked at only when a phase is finished.
   return. A 10-day minimum hold cut trades to 56 and moved log return from -0.576 to
   +0.047, a clear improvement. Kept: `--min-hold 10`. Caveat: random agents also improve
   under the same rule (-0.433 to -0.207), so most of the gain is fees saved, not skill.*
-- [ ] **4. Reduce overfitting.** Smaller network, weight decay, layer normalisation,
-  shorter training, noise added to features. *Target: validation score stops getting
-  worse during training.*
+- [x] **4. Reduce overfitting.** Tried a smaller network, weight decay, layer
+  normalisation, state noise, shorter training and a shorter input window, each on top
+  of the 10-day hold. *Result (validation, "last" rule, 10 seeds): none clearly beat the
+  baseline on return. The overfitting gap (edge over buy-and-hold per year, train minus
+  validation) was 0.40 for the baseline; a 3-day window cut it to 0.08 with validation
+  return no worse (+0.137 vs +0.047, not a clear difference). Kept: `--window 3`, as the
+  simpler model. Conclusion: regularisation does not create skill here; more data
+  (item 7) is the likelier cure.*
 - [ ] **5. Reward design.** Compare plain log return with a differential Sharpe reward
   and a drawdown-penalised reward. *Target: lower drawdown than buy-and-hold.*
 - [ ] **6. DQN upgrades.** Dueling network, n-step returns, prioritised replay, added
@@ -42,8 +47,15 @@ validation period; the test period is looked at only when a phase is finished.
 
 ## Phase C: more data, harder tests
 
-- [ ] **7. Train on several assets.** ETH, SOL, and stock index ETFs alongside BTC, with
-  one agent learning from all of them. *The strongest cure for overfitting is more data.*
+- [x] **7. Train on several assets.** (Done before items 5 and 6, because item 4
+  pointed to lack of data.) Trained on 8 crypto assets, and on 8 crypto plus SPY, QQQ and
+  GLD; scored every run on the validation period of all 11 assets against 100 random
+  agents under the same rules. *Result ("last" rule, 10 seeds, edge over random in log
+  return per year): BTC-only +0.110 [+0.034, +0.184]; 8 crypto +0.104; all 11 +0.129
+  [+0.091, +0.175]; 8 crypto with 150k steps +0.117 [+0.093, +0.150]. No clear gain in
+  the average, but the spread across seeds roughly halved and every seed was positive.
+  A plain SMA 20/50 rule scores +0.088 on the same measure with a third of the trades.
+  Kept: training on all 11 assets, and all-asset scoring as the headline measurement.*
 - [ ] **8. Walk-forward testing.** Retrain on rolling windows and test on the following
   year, repeated across the whole history, instead of one fixed split.
 
