@@ -54,6 +54,11 @@ def parse_args():
     p.add_argument("--window", type=int, default=10)
     p.add_argument("--fee", type=float, default=0.001)
     p.add_argument("--episode-length", type=int, default=365)
+    p.add_argument("--reward", default="log_return",
+                   choices=["log_return", "vol_scaled", "dsr", "drawdown", "downside"],
+                   help="what the agent is taught to maximise")
+    p.add_argument("--reward-param", type=float, default=1.0,
+                   help="strength of the drawdown / downside penalty")
     p.add_argument("--switch-penalty", type=float, default=0.0,
                    help="reward penalty per unit of position changed")
     p.add_argument("--min-hold", type=int, default=0,
@@ -147,6 +152,7 @@ def main():
                     eval_symbols=tuple(args.eval_symbols), steps=args.steps, eval_every=args.eval_every,
                     window=args.window, fee=args.fee, episode_length=args.episode_length,
                     switch_penalty=args.switch_penalty, min_hold=args.min_hold,
+                    reward_type=args.reward, reward_param=args.reward_param,
                     dqn=dqn_overrides)
     out = Path("results") / args.symbol / args.name
     out.mkdir(parents=True, exist_ok=True)

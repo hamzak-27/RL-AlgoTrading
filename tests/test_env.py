@@ -141,3 +141,40 @@ def test_metrics_use_the_calendar_for_years():
     value = 1.1 ** (np.arange(len(idx)) / (len(idx) - 1) * years)
     record = pd.DataFrame({"value": value, "position": 1.0, "traded": 0.0}, index=idx)
     assert metrics(record)["cagr"] == pytest.approx(0.10, abs=1e-6)
+
+
+def _play(env, actions):
+    env.reset(seed=0)
+    out = [env.step(a) for a in actions]
+    return [o[1] for o in out], [o[4]["value"] for o in out]
+
+
+def test_reward_types_change_the_lesson_but_never_the_money():
+    from rltrader.env import REWARD_TYPES, TARGET_VOL
+
+    df, actions = make_df(), [1] * 40 + [0] * 5 + [1] * 40
+    plain_r, plain_v = _play(TradingEnv(df), actions)
+    for kind in REWARD_TYPES:
+        rewards, values = _play(TradingEnv(df, reward_type=kind), actions)
+        assert values == plain_v
+        assert np.all(np.isfinite(rewards))
+
+    # downside: gains unchanged, losses doubled
+    down_r, _ = _play(TradingEnv(df, reward_type="downside", reward_param=1.0), actions)
+    assert down_r == pytest.approx([r * 2 if r < 0 else r for r in plain_r])
+
+    # vol_scaled: each step's return divided by that day's volatility
+    env = TradingEnv(df, reward_type="vol_scaled")
+    vol_r, _ = _play(env, actions)
+    t0 = env.first_t
+    expected = [r * TARGET_VOL / env.vol[t0 + i] for i, r in enumerate(plain_r)]
+    assert vol_r == pytest.approx(expected)
+
+    # drawdown: never more than the plain reward, and strictly less at some point
+    dd_r, _ = _play(TradingEnv(df, reward_type="drawdown", reward_param=1.0), actions)
+    assert all(d <= p + 1e-12 for d, p in zip(dd_r, plain_r)) and sum(dd_r) < sum(plain_r)
+
+    # differential Sharpe: the very first step is simply return / volatility
+    dsr_env = TradingEnv(df, reward_type="dsr")
+    dsr_r, _ = _play(dsr_env, actions)
+    assert dsr_r[0] == pytest.approx(plain_r[0] / dsr_env.vol[t0] * TARGET_VOL)

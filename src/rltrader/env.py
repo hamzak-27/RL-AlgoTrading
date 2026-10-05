@@ -23,7 +23,11 @@ import numpy as np
 import pandas as pd
 from gymnasium import spaces
 
-from .features import build_features
+from .features import VOL_WINDOW, build_features
+
+REWARD_TYPES = ("log_return", "vol_scaled", "dsr", "drawdown", "downside")
+TARGET_VOL = 0.03   # a typical daily move for crypto; keeps all rewards on one scale
+DSR_ETA = 0.01      # how quickly the differential Sharpe "forgets" old returns
 
 
 class TradingEnv(gym.Env):
@@ -40,6 +44,8 @@ class TradingEnv(gym.Env):
         end: str | None = None,
         switch_penalty: float = 0.0,
         min_hold: int = 0,
+        reward_type: str = "log_return",
+        reward_param: float = 1.0,
     ):
         """
         df:             bars with open/high/low/close/volume, ascending by date
@@ -58,6 +64,19 @@ class TradingEnv(gym.Env):
         min_hold:       after a trade the position is locked until it has been
                         held this many days. When > 0, the observation gets one
                         extra number: the share of the lock still remaining.
+        reward_type:    what the agent is taught to maximise. The money is
+                        always computed the same way; only the lesson differs.
+                        "log_return"  growth of the portfolio (the default)
+                        "vol_scaled"  growth divided by how volatile the asset
+                                      is right now, so a calm asset and a wild
+                                      one teach equally loud lessons
+                        "dsr"         differential Sharpe ratio (Moody & Saffell,
+                                      1998): did this step raise or lower the
+                                      running return-per-unit-of-risk?
+                        "drawdown"    growth, minus ``reward_param`` times any
+                                      new fall below the portfolio's own peak
+                        "downside"    growth, with losses counted
+                                      (1 + ``reward_param``) times
         start, end:     restrict trading to this date range (inclusive). Pass
                         the full price history as ``df`` and choose the period
                         here, so features at the start of a period can still
@@ -69,6 +88,11 @@ class TradingEnv(gym.Env):
         self.features = feats.to_numpy(dtype=np.float32)
         self.open = df.loc[self.dates, "open"].to_numpy()
         self.close = df.loc[self.dates, "close"].to_numpy()
+        logret = np.log(df["close"]).diff()
+        self.vol = logret.rolling(VOL_WINDOW).std().loc[self.dates].to_numpy()  # backward-looking
+        if reward_type not in REWARD_TYPES:
+            raise ValueError(f"reward_type must be one of {REWARD_TYPES}")
+        self.reward_type, self.reward_param = reward_type, reward_param
 
         self.window = window
         self.fee = fee
@@ -99,6 +123,27 @@ class TradingEnv(gym.Env):
             extra.append(self.lock / self.min_hold)
         return np.concatenate([block, np.asarray(extra, dtype=np.float32)])
 
+    def _shape(self, r: float, t: int) -> float:
+        """Turn this step's log return ``r`` into the reward the agent learns from."""
+        kind = self.reward_type
+        if kind == "vol_scaled":
+            return r * TARGET_VOL / self.vol[t]
+        if kind == "downside":
+            return r * (1.0 + self.reward_param) if r < 0 else r
+        if kind == "drawdown":
+            self.peak = max(self.peak, self.value)
+            new_drawdown = 1.0 - self.value / self.peak
+            deeper = max(0.0, new_drawdown - self.drawdown)
+            self.drawdown = new_drawdown
+            return r - self.reward_param * deeper
+        if kind == "dsr":
+            a, b = self.dsr_a, self.dsr_b
+            da, db = r - a, r * r - b
+            d = (b * da - 0.5 * a * db) / max(b - a * a, 1e-10) ** 1.5
+            self.dsr_a, self.dsr_b = a + DSR_ETA * da, b + DSR_ETA * db
+            return float(np.clip(d, -10.0, 10.0)) * TARGET_VOL
+        return r
+
     # ---------------------------------------------------------------- gym API
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
@@ -112,6 +157,8 @@ class TradingEnv(gym.Env):
         self.position = 0.0
         self.lock = 0  # days the current position must still be held
         self.value = 1.0  # portfolio value, starting from 1 unit of cash
+        self.peak, self.drawdown = 1.0, 0.0             # for the "drawdown" reward
+        self.dsr_a, self.dsr_b = 0.0, self.vol[self.t] ** 2  # running mean of r and of r^2
         return self._obs(), {}
 
     def step(self, action: int):
@@ -137,7 +184,7 @@ class TradingEnv(gym.Env):
 
         terminated = self.value <= 0.0  # wiped out: a true ending
         truncated = (self.t >= self.end_t) and not terminated  # ran out of time
-        reward = -10.0 if terminated else float(np.log(self.value / value_before))
+        reward = -10.0 if terminated else self._shape(float(np.log(self.value / value_before)), t)
         reward -= self.switch_penalty * traded
 
         info = {
