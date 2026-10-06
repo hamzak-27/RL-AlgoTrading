@@ -178,3 +178,26 @@ def test_reward_types_change_the_lesson_but_never_the_money():
     dsr_env = TradingEnv(df, reward_type="dsr")
     dsr_r, _ = _play(dsr_env, actions)
     assert dsr_r[0] == pytest.approx(plain_r[0] / dsr_env.vol[t0] * TARGET_VOL)
+
+
+def test_walk_forward_folds_never_overlap_and_gbm_labels_stay_inside_training(tmp_path, monkeypatch):
+    from rltrader.experiment import RunConfig
+    from rltrader.walkforward import fold_envs, gbm_fold, make_folds
+
+    (tmp_path / "data").mkdir()
+    make_df(n=900, seed=1).to_csv(tmp_path / "data" / "A.csv")   # 2020-01-01 .. mid 2022
+    make_df(n=900, seed=2).iloc[500:].to_csv(tmp_path / "data" / "B.csv")  # starts mid 2021
+    monkeypatch.chdir(tmp_path)
+
+    cfg = RunConfig(symbol="A", train_symbols=("A", "B"), eval_symbols=("A", "B"),
+                    window=3, min_hold=10)
+    fold = make_folds(2022, 2022)[0]
+    train, test = fold_envs(cfg, fold, ("A", "B"), "train"), fold_envs(cfg, fold, ("A", "B"), "test")
+    assert set(train) == {"A"}          # B has too little history before 2022 to learn from
+    assert set(test) == {"A", "B"}      # but both can be traded in 2022
+    assert train["A"].dates[train["A"].last_t] <= pd.Timestamp("2021-12-31")
+    assert test["A"].dates[test["A"].first_t] >= pd.Timestamp("2022-01-01")
+
+    rows = gbm_fold(cfg, 0, fold)
+    assert {r["symbol"] for r in rows} == {"A", "B"}
+    assert all(np.isfinite(r["log_return_per_year"]) for r in rows)

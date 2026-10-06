@@ -14,6 +14,8 @@ dependencies = [
     "torch",
     "gymnasium",
     "yfinance",
+    "scipy",
+    "lightgbm",
 ]
 
 [project.optional-dependencies]

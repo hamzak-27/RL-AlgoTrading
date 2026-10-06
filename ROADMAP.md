@@ -40,10 +40,28 @@ validation period; the test period is looked at only when a phase is finished.
   return no worse (+0.137 vs +0.047, not a clear difference). Kept: `--window 3`, as the
   simpler model. Conclusion: regularisation does not create skill here; more data
   (item 7) is the likelier cure.*
-- [ ] **5. Reward design.** Compare plain log return with a differential Sharpe reward
-  and a drawdown-penalised reward. *Target: lower drawdown than buy-and-hold.*
-- [ ] **6. DQN upgrades.** Dueling network, n-step returns, prioritised replay, added
-  one at a time so each one's effect is measured.
+- [x] **5. Reward design.** (Done after item 7, on all 11 assets.) Compared plain log
+  return with volatility-scaled return, differential Sharpe, a drawdown penalty and
+  double-counted losses. *Result ("last" rule, 10 seeds, all-asset validation): no reward
+  clearly raised the edge over random (baseline +0.129; vol-scaled +0.160; differential
+  Sharpe +0.108; drawdown +0.068; downside +0.092). Vol-scaled clearly cut trades (52 to
+  43 per asset). Downside clearly cut max drawdown (-46% to -41%) but by holding less
+  (39% of days vs 55%) and earning less. Drawdown penalty clearly lowered Sharpe. Kept:
+  `--reward vol_scaled`.*
+- [x] **6. DQN upgrades.** Dueling network, 3-step returns, prioritised replay, and all
+  three together, on the item 5 setup. *Result ("last" rule, 10 seeds, all-asset
+  validation, edge over random): baseline +0.160; dueling +0.128; 3-step +0.111;
+  prioritised +0.079; all three +0.112. None helped; 3-step clearly raised trading (43 to
+  56 per asset). Kept: none.*
+
+**Phase B final setup:** train on 11 assets, 10-day minimum hold, 3-day window,
+volatility-scaled reward, plain Double DQN (run name `rw_vol_scaled`).
+
+**Phase B test result** (2024-01 to 2026-10, all 11 assets, 10 seeds, log return per
+year, looked at once): DQN +0.067; random -0.015; SMA 20/50 +0.120; buy-and-hold +0.116.
+Edge over random +0.068 [+0.046, +0.116] (9 of 10 seeds positive); edge over SMA -0.066
+[-0.089, -0.019]; edge over buy-and-hold -0.063 [-0.086, -0.015]. The agent beats
+no-skill trading and loses to both simple baselines.
 
 ## Phase C: more data, harder tests
 
@@ -56,15 +74,23 @@ validation period; the test period is looked at only when a phase is finished.
   the average, but the spread across seeds roughly halved and every seed was positive.
   A plain SMA 20/50 rule scores +0.088 on the same measure with a third of the trades.
   Kept: training on all 11 assets, and all-asset scoring as the headline measurement.*
-- [ ] **8. Walk-forward testing.** Retrain on rolling windows and test on the following
-  year, repeated across the whole history, instead of one fixed split.
+- [x] **8. Walk-forward testing.** Retrained the Phase B setup for each year 2019 to
+  2026 on all earlier data and tested on that year (10 seeds, up to 11 assets, log return
+  per year). *Result: edge over random +0.156 [+0.134, +0.190], positive in 7 of 8 years;
+  edge over SMA 20/50 -0.033 [-0.055, +0.001], ahead in 3 of 8 years; edge over
+  buy-and-hold -0.038 [-0.061, -0.005]. The agent reliably beats no-skill trading and
+  roughly ties the simple baselines. Caveat: settings were chosen on 2022-2023 data.*
 
 ## Phase D: stronger comparisons
 
 - [ ] **9. A second algorithm: PPO** (Stable-Baselines3), then a recurrent version that
   has memory.
-- [ ] **10. A supervised baseline.** LightGBM predicting next-day return and trading on a
-  threshold. *If RL cannot beat this, that is itself a finding.*
+- [x] **10. A supervised baseline.** LightGBM (untuned) predicting the 10-day forward
+  return from the same features, trading long when the prediction is positive, through
+  the same walk-forward folds. *Result: edge over random +0.174 [+0.167, +0.197], positive
+  in 8 of 8 years; edge over SMA -0.015 [-0.022, +0.008]. Against the DQN: +0.018
+  [-0.015, +0.050], not a clear difference, with clearly fewer trades and a much tighter
+  spread across seeds. RL adds nothing over the supervised model here.*
 - [ ] **11. Robustness checks.** Results at several fee levels, split by market regime
   (bull / bear / sideways), and the Deflated Sharpe Ratio to account for the number of
   variants tried.

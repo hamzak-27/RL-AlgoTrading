@@ -35,10 +35,14 @@ class RunConfig:
         return asdict(self)
 
 
-def make_env(cfg: RunConfig, period: str, episode_length: int | None = None,
-             symbol: str | None = None) -> TradingEnv:
+def make_env(cfg: RunConfig, period: str | None, episode_length: int | None = None,
+             symbol: str | None = None, start: str | None = None,
+             end: str | None = None) -> TradingEnv:
+    """An environment for a named period ("train", "val", "test"), or, with
+    ``period=None``, for an explicit ``start``/``end`` date range."""
     df = load(Path("data") / f"{symbol or cfg.symbol}.csv")
-    start, end = Split().periods(df)[period]
+    if period is not None:
+        start, end = Split().periods(df)[period]
     return TradingEnv(df, window=cfg.window, fee=cfg.fee,
                       episode_length=episode_length, start=start, end=end,
                       switch_penalty=cfg.switch_penalty, min_hold=cfg.min_hold,
@@ -82,7 +86,8 @@ def train_seed(cfg: RunConfig, seed: int, out_dir: str) -> dict:
     val_env, test_env = make_env(cfg, "val"), make_env(cfg, "test")
     train_eval_env = make_env(cfg, "train")  # the whole training period, start to end
 
-    dqn_cfg = DQNConfig(**{"eps_decay_steps": cfg.steps // 2, **cfg.dqn})
+    dqn_cfg = DQNConfig(**{"eps_decay_steps": cfg.steps // 2, "per_beta_steps": cfg.steps,
+                           **cfg.dqn})
     agent = DQNAgent(train_env.observation_space.shape[0], train_env.action_space.n, dqn_cfg, seed)
 
     curve, snapshots = [], []
@@ -90,7 +95,7 @@ def train_seed(cfg: RunConfig, seed: int, out_dir: str) -> dict:
     for step in range(1, cfg.steps + 1):
         action = agent.act(obs)
         next_obs, reward, terminated, truncated, _ = train_env.step(action)
-        agent.observe(obs, action, reward, next_obs, terminated)
+        agent.observe(obs, action, reward, next_obs, terminated, truncated)
         obs = next_obs
         if terminated or truncated:
             obs, _ = train_env.reset()
